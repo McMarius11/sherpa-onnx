@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - claude/apply-gallery-patch-fbJFs
     paths:
       - '.github/workflows/android.yaml'
       - 'cmake/**'
