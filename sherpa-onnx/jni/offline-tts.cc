@@ -543,56 +543,16 @@ Java_com_k2fsa_sherpa_onnx_OfflineTts_generateWithCallbackImpl(
   sherpa_onnx::GeneratedAudio audio;
 
   if (callback) {
-    // Create a global ref so the callback survives across threads/JNI frames.
-    // Local refs are only valid within the calling JNI frame and cannot be
-    // safely used in lambdas that may execute on a different thread (e.g.,
-    // ONNX Runtime thread pool workers).
-    JavaVM *jvm = GetJavaVM();
-    if (!jvm) {
-      SHERPA_ONNX_LOGE("GetJavaVM() returned null — JNI_OnLoad was not called");
-      audio = tts->Generate(p_text, config, nullptr);
-    } else {
-      // Create a global ref so the callback survives across threads/JNI frames.
-      // Local refs are only valid within the calling JNI frame and cannot be
-      // safely used in lambdas that may execute on a different thread (e.g.,
-      // ONNX Runtime thread pool workers).
-      jobject global_callback = env->NewGlobalRef(callback);
+    std::function<int32_t(const float *, int32_t, float)> callback_wrapper =
+        [env, callback](const float *samples, int32_t n, float) -> int32_t {
+      jfloatArray samples_arr = env->NewFloatArray(n);
+      env->SetFloatArrayRegion(samples_arr, 0, n, samples);
+      int32_t ret = CallCallback(env, callback, samples_arr);
+      env->DeleteLocalRef(samples_arr);
+      return ret;
+    };
 
-      std::function<int32_t(const float *, int32_t, float)> callback_wrapper =
-          [jvm, global_callback](const float *samples, int32_t n,
-                                 float /*progress*/) -> int32_t {
-        // Obtain a JNIEnv* valid for the current thread.
-        // JNIEnv is thread-local; we must use GetEnv/AttachCurrentThread
-        // rather than capturing the caller's env pointer.
-        JNIEnv *cb_env = nullptr;
-        bool did_attach = false;
-        jint rc =
-            jvm->GetEnv(reinterpret_cast<void **>(&cb_env), JNI_VERSION_1_6);
-        if (rc == JNI_EDETACHED) {
-          if (jvm->AttachCurrentThread(&cb_env, nullptr) != JNI_OK) {
-            return 0;  // Cannot attach; abort generation
-          }
-          did_attach = true;
-        } else if (rc != JNI_OK) {
-          return 0;
-        }
-
-        jfloatArray samples_arr = cb_env->NewFloatArray(n);
-        cb_env->SetFloatArrayRegion(samples_arr, 0, n, samples);
-        int32_t ret = CallCallback(cb_env, global_callback, samples_arr);
-        cb_env->DeleteLocalRef(samples_arr);
-
-        if (did_attach) {
-          jvm->DetachCurrentThread();
-        }
-        return ret;
-      };
-
-      audio = tts->Generate(p_text, config, callback_wrapper);
-
-      // Release the global ref now that generation is complete.
-      env->DeleteGlobalRef(global_callback);
-    }
+    audio = tts->Generate(p_text, config, callback_wrapper);
   } else {
     audio = tts->Generate(p_text, config, nullptr);
   }
@@ -614,44 +574,16 @@ Java_com_k2fsa_sherpa_onnx_OfflineTts_generateWithConfigImpl(
   sherpa_onnx::GeneratedAudio audio;
 
   if (callback) {
-    JavaVM *jvm = GetJavaVM();
-    if (!jvm) {
-      SHERPA_ONNX_LOGE("GetJavaVM() returned null — JNI_OnLoad was not called");
-      audio = tts->Generate(p_text, gen_config, nullptr);
-    } else {
-      jobject global_callback = env->NewGlobalRef(callback);
+    std::function<int32_t(const float *, int32_t, float)> callback_wrapper =
+        [env, callback](const float *samples, int32_t n, float) -> int32_t {
+      jfloatArray samples_arr = env->NewFloatArray(n);
+      env->SetFloatArrayRegion(samples_arr, 0, n, samples);
+      int32_t ret = CallCallback(env, callback, samples_arr);
+      env->DeleteLocalRef(samples_arr);
+      return ret;
+    };
 
-      std::function<int32_t(const float *, int32_t, float)> callback_wrapper =
-          [jvm, global_callback](const float *samples, int32_t n,
-                                 float /*progress*/) -> int32_t {
-        JNIEnv *cb_env = nullptr;
-        bool did_attach = false;
-        jint rc =
-            jvm->GetEnv(reinterpret_cast<void **>(&cb_env), JNI_VERSION_1_6);
-        if (rc == JNI_EDETACHED) {
-          if (jvm->AttachCurrentThread(&cb_env, nullptr) != JNI_OK) {
-            return 0;
-          }
-          did_attach = true;
-        } else if (rc != JNI_OK) {
-          return 0;
-        }
-
-        jfloatArray samples_arr = cb_env->NewFloatArray(n);
-        cb_env->SetFloatArrayRegion(samples_arr, 0, n, samples);
-        int32_t ret = CallCallback(cb_env, global_callback, samples_arr);
-        cb_env->DeleteLocalRef(samples_arr);
-
-        if (did_attach) {
-          jvm->DetachCurrentThread();
-        }
-        return ret;
-      };
-
-      audio = tts->Generate(p_text, gen_config, callback_wrapper);
-
-      env->DeleteGlobalRef(global_callback);
-    }
+    audio = tts->Generate(p_text, gen_config, callback_wrapper);
   } else {
     audio = tts->Generate(p_text, gen_config, nullptr);
   }
