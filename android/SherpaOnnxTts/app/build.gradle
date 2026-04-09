@@ -3,6 +3,52 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// ── Native library download configuration ────────────────────────────
+// Toggle between "official" and "custom" in gradle.properties:
+//   sherpa_onnx_native_source=official   → upstream k2-fsa release
+//   sherpa_onnx_native_source=custom     → patched McMarius11 release
+// ─────────────────────────────────────────────────────────────────────
+
+def nativeSource = project.findProperty('sherpa_onnx_native_source') ?: 'official'
+def customBaseUrl = project.findProperty('sherpa_onnx_custom_url') ?: ''
+def officialUrl   = project.findProperty('sherpa_onnx_official_url') ?: ''
+
+def customLibs = ['libsherpa-onnx-jni.so', 'libsherpa-onnx-c-api.so',
+                  'libsherpa-onnx-cxx-api.so', 'libonnxruntime.so']
+
+task downloadNativeLibs {
+    def jniLibsDir = file("src/main/jniLibs")
+    outputs.dir jniLibsDir
+
+    doLast {
+        if (nativeSource == 'custom') {
+            logger.lifecycle("▶ Using CUSTOM native libs from: ${customBaseUrl}")
+            def arm64Dir = new File(jniLibsDir, 'arm64-v8a')
+            arm64Dir.mkdirs()
+            customLibs.each { lib ->
+                def target = new File(arm64Dir, lib)
+                if (!target.exists()) {
+                    def url = "${customBaseUrl}/${lib}"
+                    logger.lifecycle("  Downloading ${lib} ...")
+                    exec {
+                        commandLine 'curl', '-SL', '-o', target.absolutePath, url
+                    }
+                } else {
+                    logger.lifecycle("  ${lib} already present, skipping")
+                }
+            }
+        } else {
+            logger.lifecycle("▶ Using OFFICIAL native libs from: ${officialUrl}")
+            logger.lifecycle("  Download the archive manually and extract jniLibs/ into src/main/")
+            logger.lifecycle("  See: android/SherpaOnnxAar/README.md for instructions")
+        }
+    }
+}
+
+tasks.named('preBuild').configure {
+    dependsOn downloadNativeLibs
+}
+
 android {
     namespace 'com.k2fsa.sherpa.onnx'
     compileSdk 32
@@ -15,6 +61,13 @@ android {
         versionName "1.12.36"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // Only build arm64-v8a when using custom libs (only arch available)
+        if (nativeSource == 'custom') {
+            ndk {
+                abiFilters 'arm64-v8a'
+            }
+        }
     }
 
     buildTypes {
