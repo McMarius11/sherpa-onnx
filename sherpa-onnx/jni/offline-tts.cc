@@ -401,8 +401,35 @@ static int32_t CallCallback(JNIEnv *env, jobject callback,
     return 1;
   }
 
+  // Kotlin compiles (FloatArray) -> Int as Function1<FloatArray, Int>.
+  // The JVM bytecode contains:
+  //   - invoke([F)I                              (specialized, unboxed)
+  //   - invoke(Ljava/lang/Object;)Ljava/lang/Object;  (erased bridge)
+  //
+  // Try the specialized signature first (no boxing overhead), fall back to
+  // the erased bridge which is guaranteed to exist by the JVM spec.
   jmethodID invoke_mid =
-      env->GetMethodID(cls, "invoke", "([F)Ljava/lang/Integer;");
+      env->GetMethodID(cls, "invoke", "([F)I");
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    invoke_mid = nullptr;
+  }
+
+  if (invoke_mid) {
+    jint ret = env->CallIntMethod(callback, invoke_mid, samples_arr);
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+      env->DeleteLocalRef(cls);
+      return 1;
+    }
+    env->DeleteLocalRef(cls);
+    return ret;
+  }
+
+  // Fallback: erased bridge invoke(Object)Object — works for all
+  // Function1 implementations (Kotlin, Java 8 lambdas, anonymous classes).
+  invoke_mid = env->GetMethodID(
+      cls, "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;");
   if (env->ExceptionCheck() || !invoke_mid) {
     env->DeleteLocalRef(cls);
     return 1;
@@ -410,6 +437,7 @@ static int32_t CallCallback(JNIEnv *env, jobject callback,
 
   jobject result = env->CallObjectMethod(callback, invoke_mid, samples_arr);
   if (env->ExceptionCheck() || !result) {
+    if (result) env->DeleteLocalRef(result);
     env->DeleteLocalRef(cls);
     return 1;
   }
@@ -423,6 +451,38 @@ static int32_t CallCallback(JNIEnv *env, jobject callback,
   env->DeleteLocalRef(cls);
 
   return ret;
+}
+
+// Build a thread-safe std::function that wraps a JNI callback object.
+// The returned wrapper obtains a valid JNIEnv* for whatever thread it is
+// invoked on, so it is safe to call from ONNX Runtime worker threads.
+// The caller must call env->DeleteGlobalRef(global_callback) after the
+// generation call returns.
+static std::function<int32_t(const float *, int32_t, float)>
+MakeThreadSafeCallbackWrapper(JNIEnv *env, jobject global_callback) {
+  return [global_callback](const float *samples, int32_t n,
+                           float /*progress*/) -> int32_t {
+    bool did_attach = false;
+    JNIEnv *cb_env = GetJNIEnvForCurrentThread(&did_attach);
+    if (!cb_env) {
+      return 0;  // cannot get env; abort generation
+    }
+
+    jfloatArray samples_arr = cb_env->NewFloatArray(n);
+    if (!samples_arr) {
+      if (did_attach) GetJavaVM()->DetachCurrentThread();
+      return 0;  // allocation failed; abort generation
+    }
+
+    cb_env->SetFloatArrayRegion(samples_arr, 0, n, samples);
+    int32_t ret = CallCallback(cb_env, global_callback, samples_arr);
+    cb_env->DeleteLocalRef(samples_arr);
+
+    if (did_attach) {
+      GetJavaVM()->DetachCurrentThread();
+    }
+    return ret;
+  };
 }
 
 SHERPA_ONNX_EXTERN_C
@@ -543,16 +603,17 @@ Java_com_k2fsa_sherpa_onnx_OfflineTts_generateWithCallbackImpl(
   sherpa_onnx::GeneratedAudio audio;
 
   if (callback) {
-    std::function<int32_t(const float *, int32_t, float)> callback_wrapper =
-        [env, callback](const float *samples, int32_t n, float) -> int32_t {
-      jfloatArray samples_arr = env->NewFloatArray(n);
-      env->SetFloatArrayRegion(samples_arr, 0, n, samples);
-      int32_t ret = CallCallback(env, callback, samples_arr);
-      env->DeleteLocalRef(samples_arr);
-      return ret;
-    };
-
-    audio = tts->Generate(p_text, config, callback_wrapper);
+    // Promote to global ref so the callback survives across threads.
+    // Local refs are only valid within the calling JNI frame.
+    jobject global_callback = env->NewGlobalRef(callback);
+    if (!global_callback) {
+      SHERPA_ONNX_LOGE("NewGlobalRef failed for callback");
+      audio = tts->Generate(p_text, config, nullptr);
+    } else {
+      auto wrapper = MakeThreadSafeCallbackWrapper(env, global_callback);
+      audio = tts->Generate(p_text, config, wrapper);
+      env->DeleteGlobalRef(global_callback);
+    }
   } else {
     audio = tts->Generate(p_text, config, nullptr);
   }
@@ -574,16 +635,15 @@ Java_com_k2fsa_sherpa_onnx_OfflineTts_generateWithConfigImpl(
   sherpa_onnx::GeneratedAudio audio;
 
   if (callback) {
-    std::function<int32_t(const float *, int32_t, float)> callback_wrapper =
-        [env, callback](const float *samples, int32_t n, float) -> int32_t {
-      jfloatArray samples_arr = env->NewFloatArray(n);
-      env->SetFloatArrayRegion(samples_arr, 0, n, samples);
-      int32_t ret = CallCallback(env, callback, samples_arr);
-      env->DeleteLocalRef(samples_arr);
-      return ret;
-    };
-
-    audio = tts->Generate(p_text, gen_config, callback_wrapper);
+    jobject global_callback = env->NewGlobalRef(callback);
+    if (!global_callback) {
+      SHERPA_ONNX_LOGE("NewGlobalRef failed for callback");
+      audio = tts->Generate(p_text, gen_config, nullptr);
+    } else {
+      auto wrapper = MakeThreadSafeCallbackWrapper(env, global_callback);
+      audio = tts->Generate(p_text, gen_config, wrapper);
+      env->DeleteGlobalRef(global_callback);
+    }
   } else {
     audio = tts->Generate(p_text, gen_config, nullptr);
   }

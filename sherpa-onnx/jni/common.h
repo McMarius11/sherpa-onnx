@@ -142,6 +142,15 @@
 jobject NewInteger(JNIEnv *env, int32_t value);
 jobject NewFloat(JNIEnv *env, float value);
 
+// Returns the cached JavaVM pointer (set during JNI_OnLoad).
+// Use this to obtain a JNIEnv* on non-JVM threads via GetEnv/AttachCurrentThread.
+JavaVM *GetJavaVM();
+
+// Obtain a valid JNIEnv* for the current thread.  If the thread was not created
+// by the JVM, it is attached automatically; *did_attach is set to true so the
+// caller can detach later.  Returns nullptr on failure.
+JNIEnv *GetJNIEnvForCurrentThread(bool *did_attach);
+
 // Template function for non-void return types
 template <typename Func, typename ReturnType>
 ReturnType SafeJNI(JNIEnv *env, const char *functionName, Func func,

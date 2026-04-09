@@ -221,34 +221,58 @@ JNIEXPORT jobjectArray JNICALL
 Java_com_k2fsa_sherpa_onnx_OfflineSpeakerDiarization_processWithCallback(
     JNIEnv *env, jobject /*obj*/, jlong ptr, jfloatArray samples,
     jobject callback, jlong arg) {
-  std::function<int32_t(int32_t, int32_t, void *)> callback_wrapper =
-      [env, callback](int32_t num_processed_chunks, int32_t num_total_chunks,
-                      void *data) -> int {
-    jclass cls = env->GetObjectClass(callback);
+  auto sd = reinterpret_cast<sherpa_onnx::OfflineSpeakerDiarization *>(ptr);
 
-    jmethodID mid = env->GetMethodID(cls, "invoke", "(IIJ)Ljava/lang/Integer;");
+  // Promote to global ref so the callback survives across threads.
+  jobject global_callback = env->NewGlobalRef(callback);
+  if (!global_callback) {
+    SHERPA_ONNX_LOGE("NewGlobalRef failed for callback");
+    jfloat *p = env->GetFloatArrayElements(samples, nullptr);
+    jsize n = env->GetArrayLength(samples);
+    auto segments = sd->Process(p, n).SortByStartTime();
+    env->ReleaseFloatArrayElements(samples, p, JNI_ABORT);
+    return ProcessImpl(env, segments);
+  }
+
+  std::function<int32_t(int32_t, int32_t, void *)> callback_wrapper =
+      [global_callback](int32_t num_processed_chunks, int32_t num_total_chunks,
+                         void *data) -> int {
+    bool did_attach = false;
+    JNIEnv *cb_env = GetJNIEnvForCurrentThread(&did_attach);
+    if (!cb_env) {
+      return 0;
+    }
+
+    jclass cls = cb_env->GetObjectClass(global_callback);
+
+    jmethodID mid =
+        cb_env->GetMethodID(cls, "invoke", "(IIJ)Ljava/lang/Integer;");
     if (mid == nullptr) {
       SHERPA_ONNX_LOGE("Failed to get the callback. Ignore it.");
-      env->DeleteLocalRef(cls);
+      cb_env->DeleteLocalRef(cls);
+      if (did_attach) GetJavaVM()->DetachCurrentThread();
       return 0;
     }
-    env->DeleteLocalRef(cls);
+    cb_env->DeleteLocalRef(cls);
 
-    jobject ret = env->CallObjectMethod(callback, mid, num_processed_chunks,
-                                        num_total_chunks, (jlong)data);
+    jobject ret = cb_env->CallObjectMethod(
+        global_callback, mid, num_processed_chunks, num_total_chunks,
+        (jlong)data);
     if (ret == nullptr) {
+      if (did_attach) GetJavaVM()->DetachCurrentThread();
       return 0;
     }
 
-    jclass jklass = env->GetObjectClass(ret);
-    jmethodID int_value_mid = env->GetMethodID(jklass, "intValue", "()I");
-    int32_t result = env->CallIntMethod(ret, int_value_mid);
-    env->DeleteLocalRef(jklass);
-    env->DeleteLocalRef(ret);
+    jclass jklass = cb_env->GetObjectClass(ret);
+    jmethodID int_value_mid =
+        cb_env->GetMethodID(jklass, "intValue", "()I");
+    int32_t result = cb_env->CallIntMethod(ret, int_value_mid);
+    cb_env->DeleteLocalRef(jklass);
+    cb_env->DeleteLocalRef(ret);
+
+    if (did_attach) GetJavaVM()->DetachCurrentThread();
     return result;
   };
-
-  auto sd = reinterpret_cast<sherpa_onnx::OfflineSpeakerDiarization *>(ptr);
 
   jfloat *p = env->GetFloatArrayElements(samples, nullptr);
   jsize n = env->GetArrayLength(samples);
@@ -256,6 +280,8 @@ Java_com_k2fsa_sherpa_onnx_OfflineSpeakerDiarization_processWithCallback(
       sd->Process(p, n, callback_wrapper, reinterpret_cast<void *>(arg))
           .SortByStartTime();
   env->ReleaseFloatArrayElements(samples, p, JNI_ABORT);
+
+  env->DeleteGlobalRef(global_callback);
 
   return ProcessImpl(env, segments);
 }
